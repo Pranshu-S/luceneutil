@@ -56,6 +56,7 @@ import org.apache.lucene.codecs.lucene104.Lucene104HnswScalarQuantizedVectorsFor
 import org.apache.lucene.codecs.lucene104.Lucene104ScalarQuantizedVectorsFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsFormat;
 import org.apache.lucene.sandbox.codecs.dedup.DedupHnswVectorsFormat;
+import org.apache.lucene.sandbox.codecs.dedup.DedupHnswScalarQuantizedVectorsFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsReader;
 import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.CodecReader;
@@ -2340,10 +2341,18 @@ public class KnnGraphTester implements FormatterLogger {
       KnnVectorsFormat knnVectorsFormat;
       if (dedup) {
           if (quantize) {
-            throw new IllegalArgumentException("-dedup does not support -quantize");
+            // The sandbox scalar-quantized dedup codec: HNSW graph scoring against quantized
+            // vectors, backed by de-duplicated raw vector storage.
+            if (indexType == IndexType.FLAT) {
+              throw new IllegalArgumentException("-dedup -quantize requires HNSW (not -indexType flat)");
+            }
+            ScalarEncoding scalarEncoding = ScalarEncoding.fromNumBits(quantizeBits);
+            knnVectorsFormat = new DedupHnswScalarQuantizedVectorsFormat(
+                scalarEncoding, maxConn, beamWidth, numMergeWorker, exec);
+          } else {
+            // The sandbox dedup codec: an HNSW format backed by de-duplicated raw vector storage.
+            knnVectorsFormat = new DedupHnswVectorsFormat(maxConn, beamWidth, numMergeWorker, exec);
           }
-          // The sandbox dedup codec: an HNSW format backed by de-duplicated raw vector storage.
-          knnVectorsFormat = new DedupHnswVectorsFormat(maxConn, beamWidth, numMergeWorker, exec);
       } else if (quantize) {
           ScalarEncoding scalarEncoding = ScalarEncoding.fromNumBits(quantizeBits);
           knnVectorsFormat = switch (indexType) {

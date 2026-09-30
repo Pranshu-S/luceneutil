@@ -213,9 +213,25 @@ python src/python/knnPerfTest.py --dedup
 
 This appends `-dedup` to the underlying `KnnGraphTester` invocation, which selects
 `org.apache.lucene.sandbox.codecs.dedup.DedupHnswVectorsFormat` (from the `sandbox` module) for the
-vector field. The dedup codec is HNSW-based and does not support `-quantize`. Make sure your
-`gradle.properties` `external.lucene.repo` points at a Lucene checkout that contains the dedup codec,
-and that its `sandbox` module has been built (`./gradlew jar`) so the format is on the classpath.
+vector field.
+
+To instead test the scalar-quantized dedup format
+(`org.apache.lucene.sandbox.codecs.dedup.DedupHnswScalarQuantizedVectorsFormat`), combine `-dedup`
+with `-quantize`/`-quantizeBits`. The quantization bit width maps to a `ScalarEncoding` via
+`ScalarEncoding.fromNumBits(bits)` (e.g. 8, 7, 4). This path stores each distinct vector once in both
+raw (`.vdd`) and quantized (`.vdqd`/`.vdqm`) form and scores the HNSW graph against the quantized
+vectors:
+
+```
+java -cp <classpath> knn.KnnGraphTester -dedup -quantize -quantizeBits 7 -reindex \
+  -search-and-stats <queries.vec> -docs <docs.vec> -dim <D> ...
+```
+
+`-dedup -quantize` requires HNSW (it is not compatible with `-indexType flat`).
+
+Make sure your `gradle.properties` `external.lucene.repo` points at a Lucene checkout that contains
+the dedup codec, and that its `sandbox` module has been built (`./gradlew jar`) so the format is on
+the classpath.
 
 You can also invoke `KnnGraphTester` directly with `-dedup`, e.g.:
 
