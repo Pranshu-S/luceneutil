@@ -87,6 +87,9 @@ import org.apache.lucene.queries.function.valuesource.ConstKnnByteVectorValueSou
 import org.apache.lucene.queries.function.valuesource.ConstKnnFloatValueSource;
 import org.apache.lucene.queries.function.valuesource.FloatKnnVectorFieldSource;
 import org.apache.lucene.queries.function.valuesource.FloatVectorSimilarityFunction;
+import org.apache.lucene.queries.function.valuesource.ConstKnnFloat16ValueSource;
+import org.apache.lucene.queries.function.valuesource.Float16KnnVectorFieldSource;
+import org.apache.lucene.queries.function.valuesource.Float16VectorSimilarityFunction;
 import org.apache.lucene.search.AcceptDocs;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
@@ -2300,12 +2303,28 @@ public class KnnGraphTester implements FormatterLogger {
     public Void call() {
       // TODO: support docStartIndex here too
       try {
-        var queryVector = new ConstKnnFloatValueSource(query);
-        var docVectors = new FloatKnnVectorFieldSource(field);
-        Query query = switch (searchType) {
-          case KNN -> new FunctionQuery(new FloatVectorSimilarityFunction(similarityFunction, queryVector, docVectors));
-          case RADIUS -> new FunctionRangeQuery(new FloatVectorSimilarityFunction(similarityFunction, queryVector, docVectors), resultSimilarity, Float.POSITIVE_INFINITY, true, true);
-        };
+        VectorEncoding effIndexEncoding = indexEncoding == null ? vectorEncoding : indexEncoding;
+        Query query;
+        if (effIndexEncoding == VectorEncoding.FLOAT16) {
+          // exact NN must read the fp16-indexed field with fp16 sources; narrow the float query
+          short[] q16 = new short[this.query.length];
+          for (int d = 0; d < this.query.length; d++) {
+            q16[d] = Float.floatToFloat16(this.query[d]);
+          }
+          var queryVector = new ConstKnnFloat16ValueSource(q16);
+          var docVectors = new Float16KnnVectorFieldSource(field);
+          query = switch (searchType) {
+            case KNN -> new FunctionQuery(new Float16VectorSimilarityFunction(similarityFunction, queryVector, docVectors));
+            case RADIUS -> new FunctionRangeQuery(new Float16VectorSimilarityFunction(similarityFunction, queryVector, docVectors), resultSimilarity, Float.POSITIVE_INFINITY, true, true);
+          };
+        } else {
+          var queryVector = new ConstKnnFloatValueSource(this.query);
+          var docVectors = new FloatKnnVectorFieldSource(field);
+          query = switch (searchType) {
+            case KNN -> new FunctionQuery(new FloatVectorSimilarityFunction(similarityFunction, queryVector, docVectors));
+            case RADIUS -> new FunctionRangeQuery(new FloatVectorSimilarityFunction(similarityFunction, queryVector, docVectors), resultSimilarity, Float.POSITIVE_INFINITY, true, true);
+          };
+        }
         if (filterQuery != null) {
           query = new BooleanQuery.Builder()
                   .add(query, BooleanClause.Occur.SHOULD)
