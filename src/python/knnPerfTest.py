@@ -247,6 +247,9 @@ import smell_vectors as _smell
 # default: smelling enabled; --no-smell-vectors disables it
 SMELL_VECTORS_ENABLED = True
 
+# default: off; --dedup selects the sandbox DedupHnswVectorsFormat codec
+DEDUP_ENABLED = False
+
 
 def smell_vectors(dim, file_name, label):
   """Sync IO_METHOD/NOISY into smell_vectors module then run the smell."""
@@ -1371,6 +1374,10 @@ def run_knn_benchmark(checkout, values, log_path):
     if DO_HNSW_SCORE_HISTOGRAM:
       this_cmd += ["-hnswScoreHistogram"]
 
+    if DEDUP_ENABLED:
+      this_cmd += ["-dedup"]
+      print("  -dedup")
+
     if DO_STRONGLY_CONNECTED_COMPONENTS:
       this_cmd += ["-stronglyConnectedComponents"]
 
@@ -2216,10 +2223,17 @@ if __name__ == "__main__":
       action="store_true",
       help="Skip the per-dim distribution smell-test of doc/query .vec files (enabled by default).",
     )
+    parser.add_argument(
+      "--dedup",
+      action="store_true",
+      help="Use the sandbox DedupHnswVectorsFormat codec (de-duplicated raw vector storage) instead of the default HNSW codec.",
+    )
     n = parser.parse_args()
     if n.no_smell_vectors:
       # mutate the module-level flag so run_knn_benchmark sees it
       globals()["SMELL_VECTORS_ENABLED"] = False
+    if n.dedup:
+      globals()["DEDUP_ENABLED"] = True
 
     constants.check_java_home()
     check_knn_compiled()

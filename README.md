@@ -202,6 +202,27 @@ Some knn-related tasks are included in the main benchmarks. If you specifically 
 KNN/HNSW there is a script dedicated to that in src/python/knnPerfTest.py which has instructions on
 how to run it in its comments.
 
+## Testing the dedup vectors codec
+
+To benchmark the sandbox `DedupHnswVectorsFormat` (de-duplicated raw vector storage) instead of the
+default HNSW codec, pass `--dedup` to `knnPerfTest.py`:
+
+```
+python src/python/knnPerfTest.py --dedup
+```
+
+This appends `-dedup` to the underlying `KnnGraphTester` invocation, which selects
+`org.apache.lucene.sandbox.codecs.dedup.DedupHnswVectorsFormat` (from the `sandbox` module) for the
+vector field. The dedup codec is HNSW-based and does not support `-quantize`. Make sure your
+`gradle.properties` `external.lucene.repo` points at a Lucene checkout that contains the dedup codec,
+and that its `sandbox` module has been built (`./gradlew jar`) so the format is on the classpath.
+
+You can also invoke `KnnGraphTester` directly with `-dedup`, e.g.:
+
+```
+java -cp <classpath> knn.KnnGraphTester -dedup -reindex -search-and-stats <queries.vec> -docs <docs.vec> -dim <D> ...
+```
+
 ## Testing with higher dimension vectors
 
 By default we use 100/300 dimension vectors, to use higher dimension vectors (more than 384, check `highDimDataSets` in `gradle/knn.gradle`), you need to:

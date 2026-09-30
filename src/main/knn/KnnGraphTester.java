@@ -55,6 +55,7 @@ import org.apache.lucene.codecs.lucene104.Lucene104Codec;
 import org.apache.lucene.codecs.lucene104.Lucene104HnswScalarQuantizedVectorsFormat;
 import org.apache.lucene.codecs.lucene104.Lucene104ScalarQuantizedVectorsFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsFormat;
+import org.apache.lucene.sandbox.codecs.dedup.DedupHnswVectorsFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsReader;
 import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.CodecReader;
@@ -199,6 +200,8 @@ public class KnnGraphTester implements FormatterLogger {
   private boolean quantize;
   private int quantizeBits;
   private boolean quantizeCompress;
+  // whether to use the sandbox dedup vectors codec (DedupHnswVectorsFormat)
+  private boolean dedup;
   private int numMergeThread;
   private int numMergeWorker;
   private int numSearchThread;
@@ -415,6 +418,9 @@ public class KnnGraphTester implements FormatterLogger {
           break;
         case "-quantize":
           quantize = true;
+          break;
+        case "-dedup":
+          dedup = true;
           break;
         case "-quantizeBits":
           if (iarg == args.length - 1) {
@@ -680,7 +686,7 @@ public class KnnGraphTester implements FormatterLogger {
       KnnIndexer.IndexResult indexResult = new KnnIndexer(
         docVectorsPath,
         indexPath,
-        getCodec(maxConn, beamWidth, exec, numMergeWorker, quantize, quantizeBits, indexType, rerank, rerankQuantizeBits),
+        getCodec(maxConn, beamWidth, exec, numMergeWorker, quantize, quantizeBits, indexType, rerank, rerankQuantizeBits, dedup),
         numIndexThreads,
         vectorEncoding,
         dim,
@@ -1133,7 +1139,7 @@ public class KnnGraphTester implements FormatterLogger {
   @SuppressForbidden(reason = "Prints stuff")
   private double forceMerge() throws IOException, InterruptedException {
     IndexWriterConfig iwc = new IndexWriterConfig().setOpenMode(IndexWriterConfig.OpenMode.APPEND);
-    iwc.setCodec(getCodec(maxConn, beamWidth, exec, numMergeWorker, quantize, quantizeBits, indexType, rerank, rerankQuantizeBits));
+    iwc.setCodec(getCodec(maxConn, beamWidth, exec, numMergeWorker, quantize, quantizeBits, indexType, rerank, rerankQuantizeBits, dedup));
     KnnIndexer.TrackingConcurrentMergeScheduler tcms = new KnnIndexer.TrackingConcurrentMergeScheduler();
     iwc.setMergeScheduler(tcms);
     KnnIndexer.TrackingTieredMergePolicy ttmp = new KnnIndexer.TrackingTieredMergePolicy();
@@ -1652,7 +1658,7 @@ public class KnnGraphTester implements FormatterLogger {
     if (isParentJoinQuery) {
       var topChildVectors = switch (searchType) {
         case KNN -> new DiversifyingChildrenFloatKnnVectorQuery(knnField, vector, null, k + fanout, parentsFilter);
-        case RADIUS -> new FloatVectorSimilarityQuery(knnField, vector, resultSimilarity, decay, filter);
+        case RADIUS -> new FloatVectorSimilarityQuery.Adaptive(knnField, vector, resultSimilarity, decay, filter);
       };
       var query = new ToParentBlockJoinQuery(topChildVectors, parentsFilter, org.apache.lucene.search.join.ScoreMode.Max);
       TopDocs topDocs = searcher.search(query, resultSize);
@@ -2324,8 +2330,21 @@ public class KnnGraphTester implements FormatterLogger {
   static Codec getCodec(int maxConn, int beamWidth, ExecutorService exec, int numMergeWorker,
                         boolean quantize, int quantizeBits, IndexType indexType,
                         boolean rerank, int rerankQuantizeBits) {
+      return getCodec(maxConn, beamWidth, exec, numMergeWorker, quantize, quantizeBits, indexType,
+                      rerank, rerankQuantizeBits, false);
+  }
+
+  static Codec getCodec(int maxConn, int beamWidth, ExecutorService exec, int numMergeWorker,
+                        boolean quantize, int quantizeBits, IndexType indexType,
+                        boolean rerank, int rerankQuantizeBits, boolean dedup) {
       KnnVectorsFormat knnVectorsFormat;
-      if (quantize) {
+      if (dedup) {
+          if (quantize) {
+            throw new IllegalArgumentException("-dedup does not support -quantize");
+          }
+          // The sandbox dedup codec: an HNSW format backed by de-duplicated raw vector storage.
+          knnVectorsFormat = new DedupHnswVectorsFormat(maxConn, beamWidth, numMergeWorker, exec);
+      } else if (quantize) {
           ScalarEncoding scalarEncoding = ScalarEncoding.fromNumBits(quantizeBits);
           knnVectorsFormat = switch (indexType) {
             case FLAT -> new Lucene104ScalarQuantizedVectorsFormat(scalarEncoding);
@@ -2446,7 +2465,7 @@ public class KnnGraphTester implements FormatterLogger {
   }
 
   // TODO: also profile exact search
-  private static class ProfiledByteVectorSimilarityQuery extends ByteVectorSimilarityQuery implements  ProfiledVectorQuery {
+  private static class ProfiledByteVectorSimilarityQuery extends ByteVectorSimilarityQuery.Adaptive implements  ProfiledVectorQuery {
     private final LongAdder totalVisitedVectorCount;
 
     public ProfiledByteVectorSimilarityQuery(String field, byte[] target, float resultSimilarity, float decay, Query filter) {
@@ -2476,7 +2495,7 @@ public class KnnGraphTester implements FormatterLogger {
   }
 
   // TODO: also profile exact search
-  private static class ProfiledFloatVectorSimilarityQuery extends FloatVectorSimilarityQuery implements  ProfiledVectorQuery {
+  private static class ProfiledFloatVectorSimilarityQuery extends FloatVectorSimilarityQuery.Adaptive implements  ProfiledVectorQuery {
     private final LongAdder totalVisitedVectorCount;
 
     public ProfiledFloatVectorSimilarityQuery(String field, float[] target, float resultSimilarity, float decay, Query filter) {
