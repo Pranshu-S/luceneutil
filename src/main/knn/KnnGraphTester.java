@@ -62,6 +62,7 @@ import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.CodecReader;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.FloatVectorValues;
+import org.apache.lucene.index.Float16VectorValues;
 import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
@@ -96,6 +97,7 @@ import org.apache.lucene.search.FloatVectorSimilarityQuery;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.KnnByteVectorQuery;
 import org.apache.lucene.search.KnnFloatVectorQuery;
+import org.apache.lucene.search.KnnFloat16VectorQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.QueryVisitor;
 import org.apache.lucene.search.ScoreMode;
@@ -209,6 +211,9 @@ public class KnnGraphTester implements FormatterLogger {
   private ExecutorService exec;
   private VectorSimilarityFunction similarityFunction;
   private VectorEncoding vectorEncoding;
+  // encoding used for the indexed field (may differ from vectorEncoding, which is the file read
+  // format). E.g. read float32 from disk but index as FLOAT16 to exercise fp16 codecs.
+  private VectorEncoding indexEncoding;
   private Query filterQuery;
   private FilterStrategy filterStrategy;
   private Float filterSelectivity;
@@ -252,6 +257,8 @@ public class KnnGraphTester implements FormatterLogger {
     fanout = topK;
     similarityFunction = VectorSimilarityFunction.DOT_PRODUCT;
     vectorEncoding = VectorEncoding.FLOAT32;
+    // null => index using the same encoding as the file read (vectorEncoding)
+    indexEncoding = null;
     filterStrategy = null;
     filterSelectivity = null;
     quantize = false;
@@ -462,6 +469,22 @@ public class KnnGraphTester implements FormatterLogger {
               break;
             default:
               throw new IllegalArgumentException("-encoding can be 'byte' or 'float32' only");
+          }
+          break;
+        case "-indexEncoding":
+          String indexEnc = args[++iarg];
+          switch (indexEnc) {
+            case "byte":
+              indexEncoding = VectorEncoding.BYTE;
+              break;
+            case "float32":
+              indexEncoding = VectorEncoding.FLOAT32;
+              break;
+            case "float16":
+              indexEncoding = VectorEncoding.FLOAT16;
+              break;
+            default:
+              throw new IllegalArgumentException("-indexEncoding can be 'byte', 'float32' or 'float16' only");
           }
           break;
         case "-metric":
@@ -690,6 +713,7 @@ public class KnnGraphTester implements FormatterLogger {
         getCodec(maxConn, beamWidth, exec, numMergeWorker, quantize, quantizeBits, indexType, rerank, rerankQuantizeBits, dedup),
         numIndexThreads,
         vectorEncoding,
+        indexEncoding == null ? vectorEncoding : indexEncoding,
         dim,
         similarityFunction,
         numDocs,
@@ -873,11 +897,13 @@ public class KnnGraphTester implements FormatterLogger {
       long totalVectorCount = 0;
 
       int encodingByteSize = -1;
+      // stats read the indexed field, so use the index (field) encoding, not the file read encoding
+      VectorEncoding effIndexEncoding = indexEncoding == null ? vectorEncoding : indexEncoding;
       for (LeafReaderContext ctx : reader.leaves()) {
         KnnVectorsReader knnReader = ((SegmentReader) ctx.reader()).getVectorReader();
 
         int segEncodingByteSize;
-        switch (vectorEncoding) {
+        switch (effIndexEncoding) {
           case BYTE:
             // TODO: does Lucene prevent int4/int7 quantization when input is byte per dimension?
             {
@@ -893,8 +919,15 @@ public class KnnGraphTester implements FormatterLogger {
               totalVectorCount += vectors.size();
               break;
             }
+          case FLOAT16:
+            {
+              Float16VectorValues vectors = knnReader.getFloat16VectorValues(field);
+              segEncodingByteSize = vectors.getEncoding().byteSize;
+              totalVectorCount += vectors.size();
+              break;
+            }
           default:
-            throw new IllegalStateException("only FLOAT32 and BYTE input vectors are supported; got: " + vectorEncoding);
+            throw new IllegalStateException("only FLOAT32, FLOAT16 and BYTE vectors are supported; got: " + effIndexEncoding);
         }
 
         // TODO: why is encodingByteSize 4 for int4/int7 cases?
@@ -907,7 +940,7 @@ public class KnnGraphTester implements FormatterLogger {
       }
 
       int origByteSize;
-      switch (vectorEncoding) {
+      switch (effIndexEncoding) {
         case BYTE:
           // TODO: does Lucene prevent int4/int7 quantization when input is byte per dimension?
           origByteSize = Byte.BYTES;
@@ -915,8 +948,11 @@ public class KnnGraphTester implements FormatterLogger {
         case FLOAT32:
           origByteSize = Float.BYTES;
           break;
+        case FLOAT16:
+          origByteSize = Short.BYTES;
+          break;
         default:
-          throw new IllegalStateException("only FLOAT32 and BYTE input vectors are supported; got: " + vectorEncoding);
+          throw new IllegalStateException("only FLOAT32, FLOAT16 and BYTE vectors are supported; got: " + effIndexEncoding);
       }
       log("encodingByteSize=" + encodingByteSize + " origByteSize=" + origByteSize + "\n");
 
@@ -1404,6 +1440,13 @@ public class KnnGraphTester implements FormatterLogger {
               if (vectorEncoding.equals(VectorEncoding.BYTE)) {
                 byte[] target = targetReaderByte.nextBytes();
                 result = doByteVectorQuery(searcher, target, searchType, oversampledTopK, oversampledFanout, resultSimilarity, decay, filterStrategy, filterQuery, maxResultSize);
+              } else if ((indexEncoding == null ? vectorEncoding : indexEncoding).equals(VectorEncoding.FLOAT16)) {
+                float[] target = targetReader.next();
+                short[] target16 = new short[target.length];
+                for (int d = 0; d < target.length; d++) {
+                  target16[d] = Float.floatToFloat16(target[d]);
+                }
+                result = doFloat16VectorQuery(searcher, target16, searchType, oversampledTopK, oversampledFanout, filterStrategy, filterQuery, maxResultSize);
               } else {
                 float[] target = targetReader.next();
                 result = doFloatVectorQuery(searcher, target, searchType, oversampledTopK, oversampledFanout, resultSimilarity, decay, filterStrategy, filterQuery, parentJoin, maxResultSize, rerank, rerankQuantizeBits, this.topK);
@@ -1419,6 +1462,13 @@ public class KnnGraphTester implements FormatterLogger {
             if (vectorEncoding.equals(VectorEncoding.BYTE)) {
               byte[] target = targetReaderByte.nextBytes();
               results[i] = doByteVectorQuery(searcher, target, searchType, oversampledTopK, oversampledFanout, resultSimilarity, decay, filterStrategy, filterQuery, resultSizes[i]);
+            } else if ((indexEncoding == null ? vectorEncoding : indexEncoding).equals(VectorEncoding.FLOAT16)) {
+              float[] target = targetReader.next();
+              short[] target16 = new short[target.length];
+              for (int d = 0; d < target.length; d++) {
+                target16[d] = Float.floatToFloat16(target[d]);
+              }
+              results[i] = doFloat16VectorQuery(searcher, target16, searchType, oversampledTopK, oversampledFanout, filterStrategy, filterQuery, resultSizes[i]);
             } else {
               float[] target = targetReader.next();
               results[i] = doFloatVectorQuery(searcher, target, searchType, oversampledTopK, oversampledFanout, resultSimilarity, decay, filterStrategy, filterQuery, parentJoin, resultSizes[i], rerank, rerankQuantizeBits, this.topK);
@@ -1615,6 +1665,28 @@ public class KnnGraphTester implements FormatterLogger {
     } else {
       return KNN_FIELD;
     }
+  }
+
+  private static Result doFloat16VectorQuery(
+    IndexSearcher searcher, short[] target, SearchType searchType, int k, int fanout, FilterStrategy filterStrategy, Query filter, int resultSize)
+    throws IOException {
+    if (searchType == SearchType.RADIUS) {
+      throw new UnsupportedOperationException("RADIUS search is not supported for FLOAT16 index encoding");
+    }
+    Query queryTimeFilter = (filterStrategy == FilterStrategy.QUERY_TIME_PRE_FILTER) ? filter : null;
+    String knnField = getKnnField(filterStrategy);
+    ProfiledVectorQuery vectorQuery = new ProfiledKnnFloat16VectorQuery(knnField, target, k, fanout, queryTimeFilter);
+    Query query;
+    if (filterStrategy == FilterStrategy.QUERY_TIME_POST_FILTER) {
+      query = new BooleanQuery.Builder()
+        .add((Query) vectorQuery, BooleanClause.Occur.MUST)
+        .add(filter, BooleanClause.Occur.FILTER)
+        .build();
+    } else {
+      query = (Query) vectorQuery;
+    }
+    TopDocs docs = searcher.search(query, resultSize);
+    return new Result(docs, vectorQuery.totalVisitedVectorCount(), 0);
   }
 
   private static Result doByteVectorQuery(
@@ -2445,6 +2517,43 @@ public class KnnGraphTester implements FormatterLogger {
     private long totalVisitedVectorCount;
 
     ProfiledKnnFloatVectorQuery(String field, float[] target, int k, int fanout, Query filter) {
+      super(field, target, k + fanout, filter);
+      this.field = field;
+      this.target = target;
+      this.k = k;
+      this.fanout = fanout;
+      this.filter = filter;
+    }
+
+    @Override
+    public Query rewrite(IndexSearcher indexSearcher) throws IOException {
+      totalVisitedVectorCount = 0;
+      return super.rewrite(indexSearcher);
+    }
+
+    @Override
+    protected TopDocs mergeLeafResults(TopDocs[] perLeafResults) {
+      TopDocs td = TopDocs.merge(k, perLeafResults);
+      // merge leaf can happen any number of times during a rewrite
+      totalVisitedVectorCount += td.totalHits.value();
+      return td;
+    }
+
+    public long totalVisitedVectorCount() {
+      return totalVisitedVectorCount;
+    }
+
+  }
+
+  private static class ProfiledKnnFloat16VectorQuery extends KnnFloat16VectorQuery implements ProfiledVectorQuery {
+    private final Query filter;
+    private final int k;
+    private final int fanout;
+    private final String field;
+    private final short[] target;
+    private long totalVisitedVectorCount;
+
+    ProfiledKnnFloat16VectorQuery(String field, short[] target, int k, int fanout, Query filter) {
       super(field, target, k + fanout, filter);
       this.field = field;
       this.target = target;

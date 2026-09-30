@@ -26,11 +26,13 @@ import org.apache.lucene.document.Document;
 import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.KnnByteVectorField;
 import org.apache.lucene.document.KnnFloatVectorField;
+import org.apache.lucene.document.KnnFloat16VectorField;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.VectorEncoding;
+import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.util.Bits;
 
 class IndexerThread extends Thread {
@@ -41,16 +43,21 @@ class IndexerThread extends Thread {
   private final FieldType fieldType;
   private final FieldType rerankFieldType;
   private final VectorEncoding vectorEncoding;
+  private final VectorSimilarityFunction similarityFunction;
   private final byte[] byteVectorBuffer;
   private final float[] floatVectorBuffer;
+  // for FLOAT16 field indexing: read as float then narrow to fp16 short[]
+  private final short[] float16VectorBuffer;
   private final KnnIndexer.FilterScheme filterScheme;
 
-  public IndexerThread(IndexWriter iw, int dims, VectorReader vectorReader, VectorEncoding vectorEncoding, FieldType fieldType,
+  public IndexerThread(IndexWriter iw, int dims, VectorReader vectorReader, VectorEncoding vectorEncoding,
+                       VectorSimilarityFunction similarityFunction, FieldType fieldType,
                        AtomicInteger numDocsIndexed, int numDocsToIndex, KnnIndexer.FilterScheme filterScheme,
                        FieldType rerankFieldType) {
     this.iw = iw;
     this.vectorReader = vectorReader;
     this.vectorEncoding = vectorEncoding;
+    this.similarityFunction = similarityFunction;
     this.fieldType = fieldType;
     this.rerankFieldType = rerankFieldType;
     this.numDocsIndexed = numDocsIndexed;
@@ -60,14 +67,21 @@ class IndexerThread extends Thread {
       case BYTE -> {
         byteVectorBuffer = new byte[dims];
         floatVectorBuffer = null;
+        float16VectorBuffer = null;
       }
       case FLOAT32 -> {
         floatVectorBuffer = new float[dims];
         byteVectorBuffer = null;
+        float16VectorBuffer = null;
       }
-      default -> {
-        throw new IllegalArgumentException("unexpected vector encoding: " + vectorEncoding);
+      case FLOAT16 -> {
+        // read vectors as float (from the VectorReader) into floatVectorBuffer, then narrow into
+        // float16VectorBuffer for the KnnFloat16VectorField
+        floatVectorBuffer = new float[dims];
+        float16VectorBuffer = new short[dims];
+        byteVectorBuffer = null;
       }
+      default -> throw new IllegalArgumentException("unexpected vector encoding: " + vectorEncoding);
     }
   }
 
@@ -112,6 +126,19 @@ class IndexerThread extends Thread {
             }
             if (rerankFieldType != null) {
               doc.add(new KnnFloatVectorField(KnnGraphTester.KNN_FIELD_RERANK, floatVectorBuffer, rerankFieldType));
+            }
+          }
+          case FLOAT16 -> {
+            // read as float from the file, narrow to fp16 (IEEE round-to-nearest) for the field
+            float[] floats = vectorReader.next();
+            for (int i = 0; i < floats.length; i++) {
+              float16VectorBuffer[i] = Float.floatToFloat16(floats[i]);
+            }
+            if (filterScheme == null || filterScheme.keepUnfiltered()) {
+              doc.add(new KnnFloat16VectorField(KnnGraphTester.KNN_FIELD, float16VectorBuffer.clone(), similarityFunction));
+            }
+            if (filterScheme != null && filterScheme.filter().get(id)) {
+              doc.add(new KnnFloat16VectorField(KnnGraphTester.KNN_FIELD_FILTERED, float16VectorBuffer.clone(), similarityFunction));
             }
           }
         }

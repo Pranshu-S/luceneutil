@@ -70,6 +70,8 @@ public class KnnIndexer implements FormatterLogger {
   private final Path docsPath;
   private final Path indexPath;
   private final VectorEncoding vectorEncoding;
+  // encoding used to build the indexed field (may differ from vectorEncoding, the file read format)
+  private final VectorEncoding indexEncoding;
   private final int dim;
   private final VectorSimilarityFunction similarityFunction;
   private final Codec codec;
@@ -86,7 +88,7 @@ public class KnnIndexer implements FormatterLogger {
   private final boolean rerank;
 
   public KnnIndexer(Path docsPath, Path indexPath, Codec codec, int numIndexThreads,
-                    VectorEncoding vectorEncoding, int dim,
+                    VectorEncoding vectorEncoding, VectorEncoding indexEncoding, int dim,
                     VectorSimilarityFunction similarityFunction, int numDocs, int docsStartIndex, boolean quiet,
                     boolean parentJoin, Path parentJoinMetaPath, boolean useBp, FilterScheme filterScheme,
                     boolean rerank) {
@@ -95,6 +97,7 @@ public class KnnIndexer implements FormatterLogger {
     this.codec = codec;
     this.numIndexThreads = numIndexThreads;
     this.vectorEncoding = vectorEncoding;
+    this.indexEncoding = indexEncoding;
     this.dim = dim;
     this.similarityFunction = similarityFunction;
     this.numDocs = numDocs;
@@ -147,12 +150,12 @@ public class KnnIndexer implements FormatterLogger {
     // cms.setMaxMergesAndThreads(24, 12);
 
     FieldType fieldType =
-        switch (vectorEncoding) {
+        switch (indexEncoding) {
           case BYTE -> KnnByteVectorField.createFieldType(dim, similarityFunction);
           case FLOAT32 -> KnnFloatVectorField.createFieldType(dim, similarityFunction);
           case FLOAT16 -> createKnnFloat16FieldType(dim, similarityFunction);
         };
-    if (rerank && vectorEncoding != VectorEncoding.FLOAT32) {
+    if (rerank && indexEncoding != VectorEncoding.FLOAT32) {
       throw new IllegalArgumentException("rerank requires FLOAT32 vector encoding");
     }
     FieldType rerankFieldType = rerank ? KnnFloatVectorField.createFieldType(dim, similarityFunction) : null;
@@ -182,7 +185,7 @@ public class KnnIndexer implements FormatterLogger {
         AtomicInteger numDocsIndexed = new AtomicInteger();
         List<Thread> threads = new ArrayList<>();
         for (int i=0;i<numIndexThreads;i++) {
-          Thread t = new IndexerThread(iw, dim, vectorReader, vectorEncoding, fieldType, numDocsIndexed, numDocs, filterScheme, rerankFieldType);
+          Thread t = new IndexerThread(iw, dim, vectorReader, indexEncoding, similarityFunction, fieldType, numDocsIndexed, numDocs, filterScheme, rerankFieldType);
           t.setDaemon(true);
           t.start();
           threads.add(t);
